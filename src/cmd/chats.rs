@@ -418,6 +418,19 @@ pub async fn run(cli: &Cli, cmd: &ChatsCommand) -> Result<()> {
                     role: format_role(&participant.role),
                 };
                 members.push(member);
+                // Persist each participant into contacts so message senders in
+                // this chat resolve to names (covers silent members too).
+                let _ = app
+                    .get_store()
+                    .await?
+                    .upsert_contact(
+                        user.id().bare_id().unwrap_or(0),
+                        user.username(),
+                        user.first_name().unwrap_or(""),
+                        user.last_name().unwrap_or(""),
+                        user.phone().unwrap_or(""),
+                    )
+                    .await;
                 count += 1;
 
                 // Check limit (0 = unlimited)
