@@ -51,6 +51,10 @@ pub struct SyncOptions {
     pub skip_archived: bool,
     /// Sync ONLY archived chats (opposite of --skip-archived)
     pub archived_only: bool,
+    /// If set, only sync chats whose most recent message is at or after this
+    /// instant. Used to scope the daemon's startup catch-up to recently-active
+    /// chats, instead of polling every chat (which triggers FLOOD_WAIT).
+    pub active_since: Option<DateTime<Utc>>,
 }
 
 /// Get media type string and file extension from grammers Media enum
@@ -574,6 +578,7 @@ impl App {
         let chat_filter = opts.chat_filter;
         let skip_archived = opts.skip_archived;
         let archived_only = opts.archived_only;
+        let active_since = opts.active_since;
         let mut chats_to_sync: Vec<_> = Vec::new();
         for chat in all_chats {
             // If chat_filter is set, only include that specific chat
@@ -594,6 +599,14 @@ impl App {
             }
             if archived_only && !chat.archived {
                 continue;
+            }
+            // Recency scope: when set, skip chats with no recent activity
+            // (keeps the startup catch-up from polling every chat).
+            if let Some(since) = active_since {
+                match chat.last_message_ts {
+                    Some(ts) if ts >= since => {}
+                    _ => continue,
+                }
             }
             // Must have peer info to sync. Keep the resolved ref: the session
             // lookup is a database query, so re-resolving per task would double it.
