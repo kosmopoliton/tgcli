@@ -867,7 +867,7 @@ impl App {
 
     /// Resolve a chat ID to a PeerRef we can use for API calls.
     /// Iterates dialogs to find the matching peer.
-    async fn resolve_peer_ref(&self, chat_id: i64) -> Result<PeerRef> {
+    pub(crate) async fn resolve_peer_ref(&self, chat_id: i64) -> Result<PeerRef> {
         let mut dialogs = self.tg.client.iter_dialogs();
         while let Some(dialog) = dialogs.next().await? {
             let peer = dialog.peer();
