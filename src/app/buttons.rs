@@ -185,7 +185,7 @@ impl App {
                 id: m.id() as i64,
                 buttons: m.reply_markup().is_some(),
                 media: m.media().is_some(),
-                text: m.text().chars().take(60).collect(),
+                text: m.text().chars().take(4000).collect(),
             });
         }
         Ok(out)
