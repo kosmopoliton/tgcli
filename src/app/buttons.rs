@@ -163,21 +163,6 @@ fn button_text(btn: &tl::enums::KeyboardButton) -> String {
 }
 
 impl App {
-    /// Fetch a single message by id from Telegram (not the local store, so the
-    /// live `reply_markup` is available).
-    async fn fetch_one_message(&self, peer_ref: PeerRef, msg_id: i64) -> Result<Option<Message>> {
-        let mut it = self
-            .tg
-            .client
-            .iter_messages(peer_ref)
-            .offset_id(msg_id as i32 + 1)
-            .limit(1);
-        match it.next().await? {
-            Some(m) if m.id() == msg_id as i32 => Ok(Some(m)),
-            _ => Ok(None),
-        }
-    }
-
     /// Id of the newest message currently in the chat (0 if none).
     async fn top_message_id(&self, peer_ref: PeerRef) -> Result<i32> {
         let mut it = self.tg.client.iter_messages(peer_ref).limit(1);
@@ -210,7 +195,7 @@ impl App {
     pub async fn message_buttons(&self, chat_id: i64, msg_id: i64) -> Result<Vec<ButtonInfo>> {
         let peer_ref = self.resolve_peer_ref(chat_id).await?;
         let msg = self
-            .fetch_one_message(peer_ref, msg_id)
+            .fetch_message_by_id(peer_ref, msg_id)
             .await?
             .ok_or_else(|| anyhow::anyhow!("Message {} not found in chat {}", msg_id, chat_id))?;
         match msg.reply_markup() {
@@ -220,22 +205,29 @@ impl App {
     }
 
     /// Poll the chat for messages newer than `baseline`, up to `timeout_secs`.
-    /// Returns them oldest-first. Empty if nothing arrived in time.
+    /// When `sender_filter` is set, only messages from that sender are kept, so
+    /// in a busy group another user's message isn't mistaken for the bot's
+    /// follow-up. Returns them oldest-first. Empty if nothing arrived in time.
     async fn wait_for_new_messages(
         &self,
         peer_ref: PeerRef,
         baseline: i32,
         timeout_secs: u64,
+        sender_filter: Option<i64>,
     ) -> Result<Vec<Message>> {
         let deadline = Instant::now() + Duration::from_secs(timeout_secs);
         loop {
-            let mut it = self.tg.client.iter_messages(peer_ref).limit(10);
+            // Fetch a generous window so we don't miss follow-ups when several
+            // messages land between polls.
+            let mut it = self.tg.client.iter_messages(peer_ref).limit(50);
             let mut newer = Vec::new();
             while let Some(m) = it.next().await? {
-                if m.id() > baseline {
-                    newer.push(m);
-                } else {
+                if m.id() <= baseline {
                     break;
+                }
+                let from = m.sender().and_then(|p| p.id().bare_id());
+                if sender_filter.is_none() || from == sender_filter {
+                    newer.push(m);
                 }
             }
             if !newer.is_empty() {
@@ -268,19 +260,23 @@ impl App {
     ) -> Result<ClickOutcome> {
         let peer_ref = self.resolve_peer_ref(chat_id).await?;
 
+        // Always fetch the origin message first: this validates `msg_id` exists
+        // (even on the `--data` path) and gives us the sender to filter the
+        // bot's follow-up by, so another user's message in a busy group isn't
+        // mistaken for the reply.
+        let origin = self
+            .fetch_message_by_id(peer_ref, msg_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Message {} not found in chat {}", msg_id, chat_id))?;
+        let origin_sender = origin.sender().and_then(|p| p.id().bare_id());
+
         // Resolve the callback payload to send.
         let data: Vec<u8> = if let Some(b64) = data_b64 {
             URL_SAFE_NO_PAD
                 .decode(b64.trim())
                 .context("Invalid --data: expected URL-safe base64 (no padding)")?
         } else if let Some(idx) = button_idx {
-            let msg = self
-                .fetch_one_message(peer_ref, msg_id)
-                .await?
-                .ok_or_else(|| {
-                    anyhow::anyhow!("Message {} not found in chat {}", msg_id, chat_id)
-                })?;
-            let markup = msg
+            let markup = origin
                 .reply_markup()
                 .ok_or_else(|| anyhow::anyhow!("Message {} has no inline buttons", msg_id))?;
             let buttons = extract_buttons(&markup);
@@ -355,7 +351,9 @@ impl App {
         // Optionally wait for the bot's follow-up message(s).
         if download || wait.is_some() {
             let secs = wait.unwrap_or(30);
-            let newer = self.wait_for_new_messages(peer_ref, baseline, secs).await?;
+            let newer = self
+                .wait_for_new_messages(peer_ref, baseline, secs, origin_sender)
+                .await?;
             for m in &newer {
                 outcome.new_messages.push(NewMessageInfo {
                     id: m.id() as i64,

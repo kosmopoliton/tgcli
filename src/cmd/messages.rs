@@ -692,17 +692,19 @@ pub async fn run(cli: &Cli, cmd: &MessagesCommand) -> Result<()> {
             } else if buttons.is_empty() {
                 println!("No inline buttons on message {} in chat {}", msg_id, chat);
             } else {
-                println!(
-                    "{:<4} {:<13} {:<32} {}",
-                    "IDX", "KIND", "TEXT", "DATA / URL"
-                );
+                println!("{:<4} {:<13} {:<32} DATA / URL", "IDX", "KIND", "TEXT");
                 for b in &buttons {
-                    let extra = b
-                        .url
-                        .clone()
-                        .or_else(|| b.data_text.clone())
-                        .or_else(|| b.data.clone())
-                        .unwrap_or_default();
+                    // For callback buttons show the base64 payload (copy-pasteable
+                    // into `messages click --data`), appending the decoded text
+                    // when printable. URL/webview buttons show their URL.
+                    let extra = match (&b.url, &b.data) {
+                        (Some(u), _) => u.clone(),
+                        (None, Some(d)) => match &b.data_text {
+                            Some(t) => format!("{d}  ({t})"),
+                            None => d.clone(),
+                        },
+                        (None, None) => String::new(),
+                    };
                     let text: String = b.text.chars().take(30).collect();
                     println!("{:<4} {:<13} {:<32} {}", b.index, b.kind, text, extra);
                 }
@@ -769,7 +771,7 @@ pub async fn run(cli: &Cli, cmd: &MessagesCommand) -> Result<()> {
             } else if msgs.is_empty() {
                 println!("No messages in chat {}", chat);
             } else {
-                println!("{:<10} {:<4} {:<5} {}", "ID", "BTN", "MEDIA", "TEXT");
+                println!("{:<10} {:<4} {:<5} TEXT", "ID", "BTN", "MEDIA");
                 for m in &msgs {
                     let t: String = m.text.replace('\n', " ");
                     println!(
