@@ -389,9 +389,9 @@ impl Store {
         let conn = self.get_conn().await?;
         conn.execute(
             "INSERT INTO chats (id, kind, name, username, last_message_ts, is_forum, access_hash, archived)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             VALUES (?1, CASE WHEN ?2 = '' THEN 'user' ELSE ?2 END, ?3, ?4, ?5, ?6, ?7, ?8)
              ON CONFLICT(id) DO UPDATE SET
-                kind = COALESCE(excluded.kind, kind),
+                kind = CASE WHEN excluded.kind != '' THEN excluded.kind ELSE kind END,
                 name = CASE WHEN excluded.name != '' THEN excluded.name ELSE name END,
                 username = COALESCE(excluded.username, username),
                 last_message_ts = CASE WHEN excluded.last_message_ts IS NOT NULL AND (excluded.last_message_ts > last_message_ts OR last_message_ts IS NULL)
