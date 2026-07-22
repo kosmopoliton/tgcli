@@ -1511,6 +1511,23 @@ impl App {
         );
     }
 
+    /// Add (invite) a user to a supergroup/channel directly. Works when the
+    /// target user is a mutual contact / reachable via dialogs; for non-contacts
+    /// an invite link is generally required instead.
+    pub async fn add_member(&self, chat_id: i64, user_id: i64) -> Result<()> {
+        let channel = self.resolve_channel_input(chat_id).await?;
+        let user = self.resolve_user_input(user_id).await?;
+        let request = tl::functions::channels::InviteToChannel {
+            channel,
+            users: vec![user],
+        };
+        self.tg.client.invoke(&request).await.context(format!(
+            "Failed to add user {} to chat {}",
+            user_id, chat_id
+        ))?;
+        Ok(())
+    }
+
     /// Search for chats by name via Telegram API.
     /// Returns a list of matching chats (users, groups, channels).
     pub async fn search_chats(&self, query: &str, limit: usize) -> Result<Vec<SearchChatResult>> {

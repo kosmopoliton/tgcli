@@ -106,6 +106,15 @@ pub enum ChatsCommand {
         #[arg(long)]
         user: i64,
     },
+    /// Add (invite) a user to a group/channel directly (for contacts)
+    Add {
+        /// Chat ID (group or channel)
+        #[arg(long)]
+        chat: i64,
+        /// User ID to add
+        #[arg(long)]
+        user: i64,
+    },
     /// Unban a user from a group/channel
     Unban {
         /// Chat ID (group or channel)
@@ -495,6 +504,20 @@ pub async fn run(cli: &Cli, cmd: &ChatsCommand) -> Result<()> {
                 }))?;
             } else {
                 println!("Kicked user {} from chat {}", user, chat);
+            }
+        }
+        ChatsCommand::Add { chat, user } => {
+            let app = App::new(cli).await?;
+            app.add_member(*chat, *user).await?;
+
+            if cli.output.is_json() {
+                out::write_json(&serde_json::json!({
+                    "action": "add",
+                    "chat_id": chat,
+                    "user_id": user,
+                }))?;
+            } else {
+                println!("Added user {} to chat {}", user, chat);
             }
         }
         ChatsCommand::Unban { chat, user } => {
