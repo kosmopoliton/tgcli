@@ -1,3 +1,4 @@
+use crate::security;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -101,8 +102,10 @@ pub struct UpsertMessageParams {
 
 impl Store {
     pub async fn open(store_dir: &str) -> Result<Self> {
-        std::fs::create_dir_all(store_dir)?;
-        let db_path = Path::new(store_dir).join("tgcli.db");
+        let store_path = Path::new(store_dir);
+        security::prepare_store_dir(store_path)?;
+        let db_path = store_path.join("tgcli.db");
+        security::prepare_private_file(&db_path)?;
         let db_path_str = db_path.to_string_lossy();
         let db: Database = Builder::new_local(&db_path_str)
             .build()
@@ -1252,4 +1255,27 @@ fn row_to_message(row: &Row) -> Result<Message> {
         topic_id: row.get::<Option<i32>>(10).ok().flatten(),
         snippet: String::new(),
     })
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[tokio::test]
+    async fn store_directory_is_owner_only() {
+        let path = std::env::temp_dir().join(format!("tgcli-store-{}", rand::random::<u64>()));
+        Store::open(path.to_str().unwrap()).await.unwrap();
+
+        let dir_mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        let db_mode = std::fs::metadata(path.join("tgcli.db"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(dir_mode, 0o700);
+        assert_eq!(db_mode, 0o600);
+
+        std::fs::remove_dir_all(path).unwrap();
+    }
 }

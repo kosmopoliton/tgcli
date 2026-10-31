@@ -2140,8 +2140,7 @@ impl App {
         let total_size = media.size();
 
         // Create output file
-        let mut file = std::fs::File::create(&final_path)
-            .context(format!("Failed to create file '{}'", final_path.display()))?;
+        let mut file = create_download_file(&final_path)?;
 
         // Download with progress
         let mut downloaded: u64 = 0;
@@ -2369,6 +2368,61 @@ fn extract_chat_from_updates(updates: &tl::enums::Updates) -> Result<JoinChatRes
     }
 }
 
+fn create_download_file(path: &std::path::Path) -> Result<std::fs::File> {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .with_context(|| {
+            format!(
+                "Refusing to overwrite existing download destination '{}'",
+                path.display()
+            )
+        })
+}
+
+fn sanitize_download_filename(name: &str, msg_id: i64) -> (String, String) {
+    let normalized = name.replace('\\', "/");
+    let basename = normalized.rsplit('/').next().unwrap_or_default();
+
+    if basename.is_empty() || matches!(basename, "." | "..") {
+        return (format!("document_{msg_id}"), "bin".to_string());
+    }
+
+    let (raw_stem, raw_extension) = basename
+        .rsplit_once('.')
+        .filter(|(stem, extension)| !stem.is_empty() && !extension.is_empty())
+        .unwrap_or((basename, "bin"));
+
+    let mut stem = String::new();
+    let mut replacing = false;
+    for character in raw_stem.chars().take(50) {
+        if character.is_alphanumeric() || matches!(character, '-' | '_' | ' ') {
+            stem.push(character);
+            replacing = false;
+        } else if !replacing {
+            stem.push('_');
+            replacing = true;
+        }
+    }
+
+    if stem.is_empty() || matches!(stem.as_str(), "." | "..") {
+        stem = format!("document_{msg_id}");
+    }
+
+    let extension = if raw_extension.len() <= 16
+        && raw_extension
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric())
+    {
+        raw_extension.to_ascii_lowercase()
+    } else {
+        "bin".to_string()
+    };
+
+    (stem, extension)
+}
+
 /// Get filename and extension for media
 fn get_media_filename(media: &grammers_client::media::Media, msg_id: i64) -> (String, String) {
     use grammers_client::media::Media;
@@ -2376,13 +2430,10 @@ fn get_media_filename(media: &grammers_client::media::Media, msg_id: i64) -> (St
     match media {
         Media::Photo(_) => (format!("photo_{}", msg_id), "jpg".to_string()),
         Media::Document(doc) => {
-            // Try to get original filename (name() is now Option<&str>)
+            // Try to get original filename (name() is Option<&str>); sanitize it
             if let Some(name) = doc.name() {
                 if !name.is_empty() {
-                    if let Some(pos) = name.rfind('.') {
-                        return (name[..pos].to_string(), name[pos + 1..].to_string());
-                    }
-                    return (name.to_string(), "bin".to_string());
+                    return sanitize_download_filename(name, msg_id);
                 }
             }
 
@@ -2490,5 +2541,68 @@ fn format_size(bytes: u64) -> String {
         format!("{:.2} KB", bytes as f64 / KB as f64)
     } else {
         format!("{} B", bytes)
+    }
+}
+
+#[cfg(test)]
+mod security_tests {
+    use super::*;
+
+    #[test]
+    fn download_filename_cannot_escape_the_destination_directory() {
+        for name in [
+            "../../.ssh/authorized_keys",
+            "..\\..\\.ssh\\authorized_keys",
+            "/tmp/owned.txt",
+        ] {
+            let (stem, extension) = sanitize_download_filename(name, 42);
+            let output = std::path::Path::new("downloads").join(format!("{stem}.{extension}"));
+            assert_eq!(output.parent(), Some(std::path::Path::new("downloads")));
+            assert!(!stem.contains(['/', '\\']));
+            assert!(!extension.contains(['/', '\\']));
+        }
+    }
+
+    #[test]
+    fn download_filename_removes_terminal_controls_and_uses_safe_fallbacks() {
+        assert_eq!(
+            sanitize_download_filename("invoice\u{1b}]52;c;bad\u{7}.pdf", 42),
+            ("invoice_52_c_bad_".to_string(), "pdf".to_string())
+        );
+        assert_eq!(
+            sanitize_download_filename("..", 42),
+            ("document_42".to_string(), "bin".to_string())
+        );
+    }
+
+    #[test]
+    fn downloads_refuse_to_overwrite_existing_files() {
+        let dir = std::env::temp_dir().join(format!("tgcli-download-{}", rand::random::<u64>()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("report.pdf");
+        std::fs::write(&path, "existing").unwrap();
+
+        let error = create_download_file(&path).unwrap_err().to_string();
+
+        assert!(error.contains("Refusing to overwrite"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "existing");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn downloads_refuse_symbolic_link_destinations() {
+        use std::os::unix::fs::symlink;
+
+        let dir = std::env::temp_dir().join(format!("tgcli-download-{}", rand::random::<u64>()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("target");
+        let link = dir.join("report.pdf");
+        std::fs::write(&target, "existing").unwrap();
+        symlink(&target, &link).unwrap();
+
+        assert!(create_download_file(&link).is_err());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "existing");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

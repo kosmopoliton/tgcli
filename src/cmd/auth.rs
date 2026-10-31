@@ -29,6 +29,8 @@ pub async fn run(cli: &Cli, args: &AuthArgs) -> Result<()> {
 }
 
 async fn interactive_auth(cli: &Cli) -> Result<()> {
+    tg::api_id_from_env()?;
+    let api_hash = tg::api_hash_from_env()?;
     let app = App::new_unauthed(cli).await?;
     let client = &app.tg.client;
 
@@ -47,7 +49,7 @@ async fn interactive_auth(cli: &Cli) -> Result<()> {
 
     // Request login code
     let token = client
-        .request_login_code(&phone, tg::API_HASH)
+        .request_login_code(&phone, &api_hash)
         .await
         .with_context(|| format!("Failed to request login code for {}", phone))?;
     eprintln!("Login code sent via Telegram.");
@@ -119,29 +121,16 @@ async fn status(cli: &Cli) -> Result<()> {
         return Ok(());
     }
 
-    match App::new_unauthed(cli).await {
-        Ok(app) => {
-            let authed = app.tg.client.is_authorized().await?;
-            if cli.output.is_json() {
-                out::write_json(&serde_json::json!({
-                    "authenticated": authed,
-                }))?;
-            } else if authed {
-                println!("Authenticated.");
-            } else {
-                println!("Session exists but not authenticated. Run `tgcli auth`.");
-            }
-        }
-        Err(_) => {
-            if cli.output.is_json() {
-                out::write_json(&serde_json::json!({
-                    "authenticated": false,
-                    "error": "Failed to connect",
-                }))?;
-            } else {
-                println!("Session exists but failed to connect. Try `tgcli auth`.");
-            }
-        }
+    let app = App::new_unauthed(cli).await?;
+    let authed = app.tg.client.is_authorized().await?;
+    if cli.output.is_json() {
+        out::write_json(&serde_json::json!({
+            "authenticated": authed,
+        }))?;
+    } else if authed {
+        println!("Authenticated.");
+    } else {
+        println!("Session exists but not authenticated. Run `tgcli auth`.");
     }
 
     Ok(())

@@ -1,8 +1,9 @@
 pub mod send;
 pub mod sync;
 
+use crate::security;
 use crate::store::Store;
-use crate::tg::{peer_to_ref_async, TgClient};
+use crate::tg::{self, peer_to_ref_async, TgClient};
 use crate::Cli;
 use anyhow::{Context, Result};
 use grammers_session::types::PeerRef;
@@ -27,13 +28,13 @@ impl App {
     }
     pub async fn new(cli: &Cli) -> Result<Self> {
         let store_dir = cli.store_dir();
-        std::fs::create_dir_all(&store_dir)
-            .with_context(|| format!("Failed to create store directory '{}'", store_dir))?;
+        security::prepare_store_dir(std::path::Path::new(&store_dir))?;
 
         let session_path = format!("{}/session.db", store_dir);
         // SqliteSession::open creates the file if it doesn't exist
 
-        let (tg, updates_rx) = TgClient::connect_with_updates(&session_path)
+        let api_id = tg::api_id_from_env()?;
+        let (tg, updates_rx) = TgClient::connect_with_updates(&session_path, api_id)
             .await
             .context("Failed to connect to Telegram")?;
 
@@ -57,12 +58,12 @@ impl App {
     /// Create App without requiring authorization (for auth command).
     pub async fn new_unauthed(cli: &Cli) -> Result<Self> {
         let store_dir = cli.store_dir();
-        std::fs::create_dir_all(&store_dir)
-            .with_context(|| format!("Failed to create store directory '{}'", store_dir))?;
+        security::prepare_store_dir(std::path::Path::new(&store_dir))?;
 
         let session_path = format!("{}/session.db", store_dir);
 
-        let (tg, updates_rx) = TgClient::connect_with_updates(&session_path)
+        let api_id = tg::api_id_from_env()?;
+        let (tg, updates_rx) = TgClient::connect_with_updates(&session_path, api_id)
             .await
             .context("Failed to connect to Telegram")?;
         Ok(App {

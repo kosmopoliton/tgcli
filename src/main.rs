@@ -1,7 +1,10 @@
+#![allow(clippy::uninlined_format_args)]
+
 mod app;
 mod cmd;
 mod error;
 mod out;
+mod security;
 mod shutdown;
 mod store;
 mod tg;

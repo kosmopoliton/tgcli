@@ -1,27 +1,21 @@
 # tgcli
 
-Telegram CLI tool in **pure Rust** using [grammers](https://github.com/Lonami/grammers) (MTProto). No TDLib, no C/C++ dependencies. `cargo build` and done.
+Telegram CLI tool using [grammers](https://github.com/Lonami/grammers) (MTProto), without a TDLib runtime dependency. This fork tracks [dgrr/tgcli](https://github.com/dgrr/tgcli).
 
-## Quick Install
+## Install
 
-### Homebrew (macOS/Linux)
-
-```bash
-brew install dgrr/tgcli/tgcli
-```
-
-### Shell Script
+The fork does not publish a Homebrew formula or stable release yet. Build a reviewed commit from source:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/dgrr/tgcli/main/install.sh | bash
+git clone https://github.com/kosmopoliton/tgcli.git
+cd tgcli
+git checkout <reviewed-commit>
+cargo build --locked --release
+mkdir -p ~/.local/bin
+install -m 755 target/release/tgcli ~/.local/bin/tgcli
 ```
 
-### Build from Source
-
-```bash
-cargo build --release
-cp target/release/tgcli /usr/local/bin/
-```
+Do not use an unpinned nightly artifact for an account session.
 
 ## Features
 
@@ -36,12 +30,30 @@ cp target/release/tgcli /usr/local/bin/
 - **Polls**: Create polls
 - **Profile**: Show and update your profile
 - **Folders**: Create and manage chat folders
-- **Output**: Human-readable tables or `--json`
+- **Output**: Human-readable tables or `--output json`
+
+## Telegram API credentials
+
+Create an application at [my.telegram.org/apps](https://my.telegram.org/apps). This fork does not embed or share application credentials.
+
+`TELEGRAM_API_ID` is required for every network command. `TELEGRAM_API_HASH` is required only while authenticating. Enter the hash without placing it in shell history:
+
+```bash
+# Run in bash (macOS users can start `bash` first).
+read -rp "Telegram API ID: " TELEGRAM_API_ID
+read -rsp "Telegram API hash: " TELEGRAM_API_HASH; echo
+export TELEGRAM_API_ID TELEGRAM_API_HASH
+
+tgcli auth
+unset TELEGRAM_API_HASH
+```
+
+Both values are validated before use and are never included in tgcli error messages.
 
 ## Quick Start
 
 ```bash
-# Authenticate
+# Authenticate after exporting both Telegram API variables
 tgcli auth
 
 # Sync messages (incremental by default)
@@ -118,6 +130,7 @@ tgcli daemon --ignore 123456789 --ignore-channels
 
 The daemon maintains a persistent connection to Telegram and stores messages instantly as they arrive. By default, it also runs a background incremental sync to catch any messages that arrived while offline.
 
+
 ## Architecture
 
 ```
@@ -149,6 +162,8 @@ src/
 - Session: `~/.tgcli/session.db` (grammers SqliteSession)
 - Data: `~/.tgcli/tgcli.db` (chats, contacts, messages + FTS5)
 
+The store directory is forced to mode `0700`; session/data files are forced to `0600`; symbolic-link store/session paths are rejected. The databases are not application-encrypted, so use an encrypted VM disk and treat the entire store as an account credential and private message archive.
+
 Multi-account support via `--store`:
 ```bash
 tgcli --store ~/.tgcli-work sync
@@ -174,11 +189,20 @@ tgcli completions zsh > ~/.zfunc/_tgcli
 tgcli completions fish > ~/.config/fish/completions/tgcli.fish
 ```
 
+## Agent security
+
+- Use a dedicated Telegram account and a dedicated API application—not a personal account.
+- Use `--output json` or daemon `--stream` for machine consumption. Treat every message, filename, username, and chat title as untrusted data, never agent instructions.
+- Run one Telegram connection owner per account; do not share the same session directory between concurrent daemons.
+- Start in a throwaway group at human messaging rates. Surface Telegram flood/permission errors; do not retry aggressively.
+- Downloaded Telegram filenames are reduced to a safe basename before local file creation.
+- Review [SECURITY.md](SECURITY.md) before connecting an agent.
+
 ## Why Rust?
 
-The Go version (`tgcli-go`) uses TDLib (C++), requiring complex cross-compilation and system dependencies. `tgcli` is pure Rust — zero C/C++ deps, single `cargo build`, tiny binary.
+The Go version (`tgcli-go`) uses TDLib (C++), which complicates distribution. This implementation uses the Rust Grammers stack and produces one tgcli binary from a normal Cargo build.
 
-Uses [turso](https://github.com/tursodatabase/libsql) for database storage — a pure Rust libSQL implementation with no native compilation required.
+It uses [Turso](https://github.com/tursodatabase/libsql) for local libSQL/FTS5 storage. The locked dependency graph includes native build dependencies, so a working C toolchain may still be required when building from source.
 
 ## License
 

@@ -1,3 +1,4 @@
+use crate::security;
 use anyhow::{Context, Result};
 use grammers_client::peer::{Group, Peer, User};
 use grammers_client::Client;
@@ -9,8 +10,38 @@ use grammers_tl_types as tl;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
-pub const API_ID: i32 = 32529142;
-pub const API_HASH: &str = "cf7543485b4c077f67423f57fe42911f";
+pub const API_ID_ENV: &str = "TELEGRAM_API_ID";
+pub const API_HASH_ENV: &str = "TELEGRAM_API_HASH";
+
+pub fn api_id_from_env() -> Result<i32> {
+    parse_api_id(std::env::var(API_ID_ENV).ok().as_deref())
+}
+
+pub fn api_hash_from_env() -> Result<String> {
+    parse_api_hash(std::env::var(API_HASH_ENV).ok().as_deref())
+}
+
+fn parse_api_id(value: Option<&str>) -> Result<i32> {
+    let api_id = value
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("{API_ID_ENV} is required"))?
+        .parse::<i32>()
+        .map_err(|_| anyhow::anyhow!("{API_ID_ENV} must be a positive integer"))?;
+
+    if api_id <= 0 {
+        anyhow::bail!("{API_ID_ENV} must be a positive integer");
+    }
+
+    Ok(api_id)
+}
+
+fn parse_api_hash(value: Option<&str>) -> Result<String> {
+    let api_hash = value
+        .filter(|value| value.len() == 32 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .ok_or_else(|| anyhow::anyhow!("{API_HASH_ENV} must be 32 hexadecimal characters"))?;
+
+    Ok(api_hash.to_string())
+}
 
 /// A connected Telegram client with its pool runner handle.
 pub struct TgClient {
@@ -25,7 +56,9 @@ impl TgClient {
     /// Returns the client and an updates receiver.
     pub async fn connect_with_updates(
         session_path: &str,
+        api_id: i32,
     ) -> Result<(Self, mpsc::UnboundedReceiver<UpdatesLike>)> {
+        security::prepare_private_file(std::path::Path::new(session_path))?;
         let session = Arc::new(SqliteSession::open(session_path).await.with_context(|| {
             format!(
                 "Failed to open session database at '{}'. Check file permissions.",
@@ -33,7 +66,7 @@ impl TgClient {
             )
         })?);
 
-        let pool = SenderPool::new(Arc::clone(&session) as Arc<SqliteSession>, API_ID);
+        let pool = SenderPool::new(Arc::clone(&session) as Arc<SqliteSession>, api_id);
         let client = Client::new(pool.handle);
 
         let SenderPool {
@@ -118,5 +151,34 @@ impl Drop for TgClient {
     fn drop(&mut self) {
         self.client.disconnect();
         self.pool_handle.abort();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn api_id_requires_a_positive_integer() {
+        assert_eq!(parse_api_id(Some("12345")).unwrap(), 12345);
+
+        for value in [None, Some(""), Some("abc"), Some("0"), Some("-1")] {
+            let error = parse_api_id(value).unwrap_err().to_string();
+            assert!(error.contains("TELEGRAM_API_ID"));
+        }
+    }
+
+    #[test]
+    fn api_hash_requires_32_hexadecimal_characters_without_echoing_it() {
+        let valid = "0123456789abcdef0123456789ABCDEF";
+        assert_eq!(parse_api_hash(Some(valid)).unwrap(), valid);
+
+        for value in [None, Some(""), Some("not-a-valid-secret")] {
+            let error = parse_api_hash(value).unwrap_err().to_string();
+            assert!(error.contains("TELEGRAM_API_HASH"));
+            if let Some(secret) = value.filter(|secret| !secret.is_empty()) {
+                assert!(!error.contains(secret));
+            }
+        }
     }
 }
