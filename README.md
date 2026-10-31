@@ -4,6 +4,18 @@ Telegram CLI tool using [grammers](https://github.com/Lonami/grammers) (MTProto)
 
 ## Install
 
+## What's in this fork
+
+Integrated from other forks and upstream PRs (see CHANGELOG.md for provenance):
+
+- **grammers 0.10 / MTProto layer 227** — required; Telegram rejects the old layer.
+- **Own Telegram API credentials** (`TELEGRAM_API_ID`, `TELEGRAM_API_HASH`), store dir `0700`, session/db files `0600`, sanitized download filenames.
+- **Full-history backfill** — `messages fetch --all`, `--download-media`, repeatable `--chat`.
+- **Contacts auto-populated from message senders.**
+- **Inline buttons** — `messages buttons`, `messages click`, `messages latest`.
+- **Loss-resistant daemon capture** — live updates are committed using their raw peer ID before peer metadata is resolved; startup and periodic (3 h) reconciliation of recent history.
+- `chats add` to invite a contact directly; outbound sends no longer clobber a chat's kind.
+
 The fork does not publish a Homebrew formula or stable release yet. Build a reviewed commit from source:
 
 ```bash
@@ -149,15 +161,22 @@ tgcli daemon
 # Daemon with JSONL output (for pipelines)
 tgcli daemon --stream
 
-# Skip background sync (pure real-time only)
+# Skip the optional full background sync; durable catch-up and reconciliation remain enabled
 tgcli daemon --no-backfill
 
 # Ignore specific chats or all channels
 tgcli daemon --ignore 123456789 --ignore-channels
+
+# Skip the startup catch-up sync
+tgcli daemon --no-startup-catchup
+
+# Change the periodic reconciliation interval, or disable it with 0
+tgcli daemon --reconcile-interval-seconds 10800
 ```
 
-The daemon maintains a persistent connection to Telegram and stores messages instantly as they arrive. By default, it also runs a background incremental sync to catch any messages that arrived while offline.
+The daemon maintains a persistent connection to Telegram and stores messages instantly as they arrive. A live message is committed before full chat metadata is resolved; unresolved peers remain in a durable retry queue instead of causing the message to be skipped.
 
+**Automatic reconciliation**: on every (re)start, and every three hours thereafter, the daemon refreshes peer metadata and incrementally reconciles chats active within the last 30 days (plus all archived chats). Telegram update-state catch-up also remains enabled when `--no-backfill` is used. Disable only the startup pass with `--no-startup-catchup`, or only the periodic pass with `--reconcile-interval-seconds 0`.
 
 ## Architecture
 

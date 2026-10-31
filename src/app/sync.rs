@@ -10,7 +10,7 @@ use grammers_client::message::Message as TgMessage;
 use grammers_client::peer::Peer;
 use grammers_client::Client;
 use grammers_session::storages::SqliteSession;
-use grammers_session::types::{PeerAuth, PeerId, PeerRef};
+use grammers_session::types::{ChannelKind, PeerAuth, PeerId, PeerInfo, PeerRef};
 use grammers_session::Session;
 use grammers_tl_types as tl;
 use std::collections::HashSet;
@@ -179,6 +179,10 @@ struct ChatSyncTaskResult {
     highest_msg_id: Option<i64>,
     latest_ts: Option<DateTime<Utc>>,
     topic_counts: std::collections::HashMap<i32, u64>,
+    /// True only when history reached the previous checkpoint (or the real
+    /// beginning of the chat). A partial fetch must never advance past an
+    /// unseen range.
+    checkpoint_complete: bool,
     error: Option<String>,
 }
 
@@ -371,6 +375,76 @@ impl App {
                 Ok((Some(media_type), None))
             }
         }
+    }
+
+    /// Refresh active dialog metadata without fetching messages or forum
+    /// topics. This is intentionally lightweight enough for the daemon's
+    /// periodic reconciliation pass and clears durable peer-resolution markers
+    /// as full peers become available again.
+    pub async fn refresh_active_dialogs(
+        &mut self,
+        ignore_chat_ids: &[i64],
+        ignore_channels: bool,
+    ) -> Result<(u64, u64)> {
+        let ignore_set: HashSet<i64> = ignore_chat_ids.iter().copied().collect();
+        let store = self.get_store().await?;
+        let mut chats_refreshed = 0u64;
+        let mut dialogs = self.tg.client.iter_dialogs();
+
+        while let Some(dialog) = dialogs
+            .next()
+            .await
+            .context("Failed to refresh dialogs from Telegram")?
+        {
+            let peer = dialog.peer();
+            let last_message_ts = dialog.last_message.as_ref().map(|message| message.date());
+            let (kind, name, username, is_forum, access_hash) = peer_info(peer);
+            cache_resolved_peer(&self.tg.session, peer, access_hash).await;
+            let Some(id) = peer.id().bare_id() else {
+                continue;
+            };
+            if ignore_set.contains(&id) || (ignore_channels && kind == "channel") {
+                continue;
+            }
+            // Telegram reports the archive as folder 1. Use that rather than a
+            // hard-coded `false`, so a reconcile pass never un-archives chats.
+            let archived = match &dialog.raw {
+                tl::enums::Dialog::Dialog(d) => d.folder_id == Some(1),
+                _ => false,
+            };
+
+            store
+                .upsert_chat(
+                    id,
+                    &kind,
+                    &name,
+                    username.as_deref(),
+                    last_message_ts,
+                    is_forum,
+                    access_hash,
+                    archived,
+                )
+                .await?;
+
+            if let Peer::User(user) = peer {
+                if let Some(user_id) = user.id().bare_id() {
+                    store
+                        .upsert_contact(
+                            user_id,
+                            user.username(),
+                            user.first_name().unwrap_or(""),
+                            user.last_name().unwrap_or(""),
+                            user.phone().unwrap_or(""),
+                        )
+                        .await?;
+                }
+            }
+            chats_refreshed += 1;
+        }
+
+        store.mark_pending_peer_resolutions_attempted().await?;
+        let still_pending = store.pending_peer_resolution_count().await?;
+        Ok((chats_refreshed, still_pending))
     }
 
     /// Sync only chat list from Telegram dialogs (no messages).
@@ -571,8 +645,14 @@ impl App {
         let ignore_set: HashSet<i64> = opts.ignore_chat_ids.iter().copied().collect();
         let ignore_channels = opts.ignore_channels;
 
-        // Get all chats that have sync checkpoints
-        let all_chats = self.get_store().await?.list_chats_with_checkpoint().await?;
+        // Include chats without a checkpoint: they may have first appeared
+        // while the daemon was offline and still need their initial history
+        // window captured.
+        let all_chats = self
+            .get_store()
+            .await?
+            .list_chats_for_message_sync()
+            .await?;
 
         // Filter chats to process (async: peer resolution queries the session)
         let chat_filter = opts.chat_filter;
@@ -600,12 +680,16 @@ impl App {
             if archived_only && !chat.archived {
                 continue;
             }
-            // Recency scope: when set, skip chats with no recent activity
-            // (keeps the startup catch-up from polling every chat).
-            if let Some(since) = active_since {
-                match chat.last_message_ts {
-                    Some(ts) if ts >= since => {}
-                    _ => continue,
+            // Recency-scope the large active-dialog set, but always audit
+            // archived chats. Telegram can be configured to keep chats
+            // archived when new messages arrive, so their local activity
+            // timestamp may otherwise remain stale after downtime.
+            if !chat.archived {
+                if let Some(since) = active_since {
+                    match chat.last_message_ts {
+                        Some(ts) if ts >= since => {}
+                        _ => continue,
+                    }
                 }
             }
             // Must have peer info to sync. Keep the resolved ref: the session
@@ -743,6 +827,7 @@ impl App {
                             highest_msg_id: None,
                             latest_ts: None,
                             topic_counts: std::collections::HashMap::new(),
+                            checkpoint_complete: false,
                             error: None,
                         };
                     }
@@ -760,6 +845,7 @@ impl App {
                     let mut latest_ts: Option<DateTime<Utc>> = None;
                     let mut topic_counts: std::collections::HashMap<i32, u64> =
                         std::collections::HashMap::new();
+                    let mut checkpoint_complete = !incremental || last_sync_id.is_none();
                     let mut error: Option<String> = None;
 
                     loop {
@@ -776,6 +862,7 @@ impl App {
                                 // Stop when we hit a message we've already seen
                                 if let Some(last_id) = last_sync_id {
                                     if msg_id <= last_id {
+                                        checkpoint_complete = true;
                                         break;
                                     }
                                 }
@@ -787,6 +874,10 @@ impl App {
                                     messages_per_chat
                                 };
                                 if messages.len() >= max_messages {
+                                    error = Some(format!(
+                                        "History safety limit reached for chat {} ({}); checkpoint left unchanged",
+                                        chat.name, chat.id
+                                    ));
                                     break;
                                 }
 
@@ -877,7 +968,10 @@ impl App {
 
                                 messages_fetched.fetch_add(1, Ordering::Relaxed);
                             }
-                            Ok(None) => break,
+                            Ok(None) => {
+                                checkpoint_complete = true;
+                                break;
+                            }
                             Err(e) => {
                                 error = Some(format!(
                                     "Failed to fetch messages for chat {} ({}): {}",
@@ -902,6 +996,7 @@ impl App {
                         highest_msg_id,
                         latest_ts,
                         topic_counts,
+                        checkpoint_complete,
                         error,
                     }
                 }
@@ -997,11 +1092,19 @@ impl App {
             }
 
             // Update last_sync_message_id for incremental sync
-            if let Some(high_id) = result.highest_msg_id {
-                self.get_store()
-                    .await?
-                    .update_last_sync_message_id(result.chat_id, high_id)
-                    .await?;
+            if result.checkpoint_complete {
+                if let Some(high_id) = result.highest_msg_id {
+                    self.get_store()
+                        .await?
+                        .update_last_sync_message_id(result.chat_id, high_id)
+                        .await?;
+                }
+            } else if result.highest_msg_id.is_some() {
+                log::warn!(
+                    "Chat {} ({}): partial history stored; checkpoint unchanged for safe retry",
+                    result.chat_name,
+                    result.chat_id
+                );
             }
 
             // Track per-chat summary if messages were synced
@@ -1235,6 +1338,8 @@ impl App {
             } else {
                 opts.messages_per_chat
             };
+            let mut checkpoint_complete = !opts.incremental || last_sync_id.is_none();
+            let mut fetch_stopped_early = false;
 
             while let Some(msg) = message_iter
                 .next()
@@ -1243,6 +1348,7 @@ impl App {
             {
                 // Check for shutdown during message fetching
                 if shutdown_ctrl.is_triggered() {
+                    fetch_stopped_early = true;
                     break;
                 }
 
@@ -1251,6 +1357,7 @@ impl App {
                 // For incremental sync, stop when we hit a message we've already seen
                 if let Some(last_id) = last_sync_id {
                     if msg_id <= last_id {
+                        checkpoint_complete = true;
                         log::debug!(
                             "Chat {}: reached last synced message {} (stopping at {})",
                             id,
@@ -1262,6 +1369,12 @@ impl App {
                 }
 
                 if count >= max_messages {
+                    fetch_stopped_early = true;
+                    log::warn!(
+                        "Chat {} ({}): history safety limit reached; checkpoint left unchanged",
+                        name,
+                        id
+                    );
                     break;
                 }
                 count += 1;
@@ -1387,6 +1500,11 @@ impl App {
                     OutputMode::None => {}
                 }
             }
+            if !fetch_stopped_early {
+                // Either the previous checkpoint or the real beginning of the
+                // history was reached without an error.
+                checkpoint_complete = true;
+            }
 
             // Update chat's last_message_ts
             if let Some(ts) = latest_ts {
@@ -1406,11 +1524,19 @@ impl App {
             }
 
             // Update last_sync_message_id for incremental sync
-            if let Some(high_id) = highest_msg_id {
-                self.get_store()
-                    .await?
-                    .update_last_sync_message_id(id, high_id)
-                    .await?;
+            if checkpoint_complete {
+                if let Some(high_id) = highest_msg_id {
+                    self.get_store()
+                        .await?
+                        .update_last_sync_message_id(id, high_id)
+                        .await?;
+                }
+            } else if highest_msg_id.is_some() {
+                log::warn!(
+                    "Chat {} ({}): partial history stored; checkpoint unchanged for safe retry",
+                    name,
+                    id
+                );
             }
 
             // If it's a forum, sync topics first so we can get names
@@ -1577,6 +1703,8 @@ impl App {
                 } else {
                     opts.messages_per_chat
                 };
+                let mut checkpoint_complete = !opts.incremental || last_sync_id.is_none();
+                let mut fetch_stopped_early = false;
 
                 while let Some(msg) = message_iter.next().await.with_context(|| {
                     format!(
@@ -1586,6 +1714,7 @@ impl App {
                 })? {
                     // Check for shutdown during message fetching
                     if shutdown_ctrl.is_triggered() {
+                        fetch_stopped_early = true;
                         break;
                     }
 
@@ -1594,6 +1723,7 @@ impl App {
                     // For incremental sync, stop when we hit a message we've already seen
                     if let Some(last_id) = last_sync_id {
                         if msg_id <= last_id {
+                            checkpoint_complete = true;
                             log::debug!(
                                 "Archived chat {}: reached last synced message {} (stopping at {})",
                                 id,
@@ -1605,6 +1735,12 @@ impl App {
                     }
 
                     if count >= max_messages {
+                        fetch_stopped_early = true;
+                        log::warn!(
+                            "Archived chat {} ({}): history safety limit reached; checkpoint left unchanged",
+                            name,
+                            id
+                        );
                         break;
                     }
                     count += 1;
@@ -1684,6 +1820,11 @@ impl App {
                         last_progress_time = std::time::Instant::now();
                     }
                 }
+                if !fetch_stopped_early {
+                    // Either the previous checkpoint or the real beginning of
+                    // history was reached without an error.
+                    checkpoint_complete = true;
+                }
 
                 // Update chat's last_message_ts
                 if let Some(ts) = latest_ts {
@@ -1703,11 +1844,19 @@ impl App {
                 }
 
                 // Update last_sync_message_id for incremental sync
-                if let Some(high_id) = highest_msg_id {
-                    self.get_store()
-                        .await?
-                        .update_last_sync_message_id(id, high_id)
-                        .await?;
+                if checkpoint_complete {
+                    if let Some(high_id) = highest_msg_id {
+                        self.get_store()
+                            .await?
+                            .update_last_sync_message_id(id, high_id)
+                            .await?;
+                    }
+                } else if highest_msg_id.is_some() {
+                    log::warn!(
+                        "Archived chat {} ({}): partial history stored; checkpoint unchanged for safe retry",
+                        name,
+                        id
+                    );
                 }
 
                 // If it's a forum, sync topics first so we can get names
@@ -2215,6 +2364,65 @@ fn peer_info(peer: &Peer) -> (String, String, Option<String>, bool, Option<i64>)
             let access_hash = channel.raw.access_hash;
             ("channel".to_string(), name, username, false, access_hash)
         }
+    }
+}
+
+/// Seed grammers' durable session cache with the full peers returned by the
+/// dialog refresh. Its update-state catch-up needs channel access hashes; the
+/// local tgcli database alone is not visible to grammers.
+async fn cache_resolved_peer(session: &SqliteSession, peer: &Peer, access_hash: Option<i64>) {
+    let info = match peer {
+        Peer::User(user) => {
+            let (Some(hash), Some(id)) = (access_hash, user.id().bare_id()) else {
+                // Do not replace an existing cached user (notably self) with
+                // less authority than the session already has.
+                return;
+            };
+            PeerInfo::User {
+                id,
+                auth: Some(PeerAuth::from_hash(hash)),
+                bot: Some(user.is_bot()),
+                is_self: Some(user.is_self()),
+            }
+        }
+        Peer::Group(group) => {
+            let Some(id) = group.id().bare_id() else {
+                return;
+            };
+            match group.id().kind() {
+                grammers_session::types::PeerKind::Chat => PeerInfo::Chat { id },
+                grammers_session::types::PeerKind::Channel => {
+                    let Some(hash) = access_hash else {
+                        return;
+                    };
+                    let kind = match &group.raw {
+                        tl::enums::Chat::Channel(channel) if channel.gigagroup => {
+                            ChannelKind::Gigagroup
+                        }
+                        _ => ChannelKind::Megagroup,
+                    };
+                    PeerInfo::Channel {
+                        id,
+                        auth: Some(PeerAuth::from_hash(hash)),
+                        kind: Some(kind),
+                    }
+                }
+                grammers_session::types::PeerKind::User => return,
+            }
+        }
+        Peer::Channel(channel) => {
+            let (Some(hash), Some(id)) = (access_hash, channel.id().bare_id()) else {
+                return;
+            };
+            PeerInfo::Channel {
+                id,
+                auth: Some(PeerAuth::from_hash(hash)),
+                kind: Some(ChannelKind::Broadcast),
+            }
+        }
+    };
+    if let Err(e) = session.cache_peer(&info).await {
+        log::warn!("Failed to cache peer in session: {}", e);
     }
 }
 
