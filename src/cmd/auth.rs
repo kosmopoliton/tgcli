@@ -121,16 +121,37 @@ async fn status(cli: &Cli) -> Result<()> {
         return Ok(());
     }
 
-    let app = App::new_unauthed(cli).await?;
-    let authed = app.tg.client.is_authorized().await?;
-    if cli.output.is_json() {
-        out::write_json(&serde_json::json!({
-            "authenticated": authed,
-        }))?;
-    } else if authed {
-        println!("Authenticated.");
-    } else {
-        println!("Session exists but not authenticated. Run `tgcli auth`.");
+    // Keep `status` script-friendly: a connect failure (missing TELEGRAM_API_ID,
+    // unreadable session, network) is reported, not raised.
+    let authed = match App::new_unauthed(cli).await {
+        Ok(app) => match app.tg.client.is_authorized().await {
+            Ok(authed) => Ok(authed),
+            Err(e) => Err(e.to_string()),
+        },
+        Err(e) => Err(e.to_string()),
+    };
+    match authed {
+        Ok(authed) => {
+            if cli.output.is_json() {
+                out::write_json(&serde_json::json!({
+                    "authenticated": authed,
+                }))?;
+            } else if authed {
+                println!("Authenticated.");
+            } else {
+                println!("Session exists but not authenticated. Run `tgcli auth`.");
+            }
+        }
+        Err(err) => {
+            if cli.output.is_json() {
+                out::write_json(&serde_json::json!({
+                    "authenticated": false,
+                    "error": err,
+                }))?;
+            } else {
+                println!("Session exists but failed to connect: {}. Try `tgcli auth`.", err);
+            }
+        }
     }
 
     Ok(())

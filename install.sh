@@ -2,9 +2,9 @@
 set -euo pipefail
 
 # tgcli installer
-# Usage: curl -fsSL https://raw.githubusercontent.com/dgrr/tgcli/main/install.sh | bash
+# Usage: curl -fsSL https://raw.githubusercontent.com/kosmopoliton/tgcli/main/install.sh | bash
 
-REPO="dgrr/tgcli"
+REPO="kosmopoliton/tgcli"
 BINARY="tgcli"
 INSTALL_DIR="${INSTALL_DIR:-}"
 
