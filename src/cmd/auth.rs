@@ -126,9 +126,9 @@ async fn status(cli: &Cli) -> Result<()> {
     let authed = match App::new_unauthed(cli).await {
         Ok(app) => match app.tg.client.is_authorized().await {
             Ok(authed) => Ok(authed),
-            Err(e) => Err(e.to_string()),
+            Err(e) => Err(format!("{e:#}")),
         },
-        Err(e) => Err(e.to_string()),
+        Err(e) => Err(format!("{e:#}")),
     };
     match authed {
         Ok(authed) => {
@@ -149,7 +149,10 @@ async fn status(cli: &Cli) -> Result<()> {
                     "error": err,
                 }))?;
             } else {
-                println!("Session exists but failed to connect: {}. Try `tgcli auth`.", err);
+                println!(
+                    "Session exists but failed to connect: {}. Try `tgcli auth`.",
+                    err
+                );
             }
         }
     }

@@ -146,9 +146,25 @@ async fn install_service(
         cmd_args.push(id.to_string());
     }
 
+    // The daemon needs TELEGRAM_API_ID (and uses TELEGRAM_API_HASH only if a
+    // re-authentication is ever needed). Service managers do not inherit the
+    // caller's shell environment, so capture the validated values now and write
+    // them into the unit. Refuse to install a service that would restart-loop.
+    let api_id = crate::tg::api_id_from_env().context(
+        "daemon-service install needs TELEGRAM_API_ID in the environment (e.g. run it via your tg wrapper)",
+    )?;
+    let api_hash = crate::tg::api_hash_from_env().ok();
+    let mut env_vars: Vec<(&str, String)> = vec![
+        ("RUST_LOG", "info".to_string()),
+        (crate::tg::API_ID_ENV, api_id.to_string()),
+    ];
+    if let Some(hash) = api_hash {
+        env_vars.push((crate::tg::API_HASH_ENV, hash));
+    }
+
     match platform {
-        "macos" => install_launchd(&binary_path, &store, &cmd_args).await,
-        "linux" => install_systemd(&binary_path, &store, &cmd_args).await,
+        "macos" => install_launchd(&binary_path, &store, &cmd_args, &env_vars).await,
+        "linux" => install_systemd(&binary_path, &store, &cmd_args, &env_vars).await,
         _ => Err(anyhow::anyhow!(
             "Unsupported platform: {}. Only macOS and Linux are supported.",
             platform
@@ -157,7 +173,23 @@ async fn install_service(
 }
 
 /// Install as launchd service on macOS
-async fn install_launchd(binary_path: &str, store: &str, cmd_args: &[String]) -> Result<()> {
+/// Write a service unit readable by the owner only (it may carry TELEGRAM_API_HASH).
+fn write_private_unit(path: &std::path::Path, content: &str) -> Result<()> {
+    fs::write(path, content)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}
+
+async fn install_launchd(
+    binary_path: &str,
+    store: &str,
+    cmd_args: &[String],
+    env_vars: &[(&str, String)],
+) -> Result<()> {
     let domain = generate_service_domain(store);
 
     // Create log directory
@@ -199,8 +231,7 @@ async fn install_launchd(binary_path: &str, store: &str, cmd_args: &[String]) ->
     
     <key>EnvironmentVariables</key>
     <dict>
-        <key>RUST_LOG</key>
-        <string>info</string>
+{env_vars}
     </dict>
 </dict>
 </plist>
@@ -210,6 +241,11 @@ async fn install_launchd(binary_path: &str, store: &str, cmd_args: &[String]) ->
         program_args = cmd_args
             .iter()
             .map(|arg| format!("        <string>{}</string>", arg))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        env_vars = env_vars
+            .iter()
+            .map(|(k, v)| format!("        <key>{}</key>\n        <string>{}</string>", k, v))
             .collect::<Vec<_>>()
             .join("\n"),
         log_path = log_base.display()
@@ -223,7 +259,7 @@ async fn install_launchd(binary_path: &str, store: &str, cmd_args: &[String]) ->
     fs::create_dir_all(&plist_dir)?;
 
     let plist_path = plist_dir.join(format!("{}.plist", domain));
-    fs::write(&plist_path, &plist_content)?;
+    write_private_unit(&plist_path, &plist_content)?;
 
     println!("✓ Service plist created at: {}", plist_path.display());
 
@@ -246,7 +282,12 @@ async fn install_launchd(binary_path: &str, store: &str, cmd_args: &[String]) ->
 }
 
 /// Install as systemd service on Linux
-async fn install_systemd(binary_path: &str, store: &str, cmd_args: &[String]) -> Result<()> {
+async fn install_systemd(
+    binary_path: &str,
+    store: &str,
+    cmd_args: &[String],
+    env_vars: &[(&str, String)],
+) -> Result<()> {
     let domain = generate_service_domain(store);
 
     // Create log directory
@@ -267,7 +308,7 @@ Restart=always
 RestartSec=5
 StandardOutput=append:{}
 StandardError=append:{}
-Environment=RUST_LOG=info
+{}
 
 [Install]
 WantedBy=multi-user.target
@@ -276,7 +317,12 @@ WantedBy=multi-user.target
         binary_path,
         cmd_args.join(" "),
         log_base.with_extension("out").display(),
-        log_base.with_extension("err").display()
+        log_base.with_extension("err").display(),
+        env_vars
+            .iter()
+            .map(|(k, v)| format!("Environment={}={}", k, v))
+            .collect::<Vec<_>>()
+            .join("\n")
     );
 
     // Determine systemd user directory
@@ -287,7 +333,7 @@ WantedBy=multi-user.target
     fs::create_dir_all(&systemd_dir)?;
 
     let service_path = systemd_dir.join(format!("{}.service", domain));
-    fs::write(&service_path, &service_content)?;
+    write_private_unit(&service_path, &service_content)?;
 
     println!("✓ Service file created at: {}", service_path.display());
 

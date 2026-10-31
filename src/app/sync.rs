@@ -339,6 +339,14 @@ impl App {
         // Create directory if needed
         std::fs::create_dir_all(&media_dir)?;
 
+        // The extension comes from a peer-supplied filename or MIME subtype:
+        // apply the same rule as the interactive downloader (<=16 ASCII
+        // alphanumerics, lower-cased, else "bin").
+        let ext = if ext.len() <= 16 && ext.bytes().all(|b| b.is_ascii_alphanumeric()) {
+            ext.to_ascii_lowercase()
+        } else {
+            "bin".to_string()
+        };
         let file_name = format!("{}.{}", msg.id(), ext);
         let file_path = media_dir.join(&file_name);
 
