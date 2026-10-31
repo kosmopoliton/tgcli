@@ -1,5 +1,10 @@
 # Security
 
+> Inherited on 2026-10-31 from exocognito's fork (commit 379e990, review dated 2026-07-21) when its
+> hardening was integrated into kosmopoliton/tgcli. The threat model and findings below are theirs;
+> the "Status" column was updated to reflect this branch where it differs. Statements about
+> dependency versions describe this branch's `Cargo.lock` as of 2026-10-31.
+
 ## Threat model
 
 This fork is intended for a dedicated Telegram user account operated by an AI agent in an isolated VM. Telegram messages, media names, usernames, chat titles, invite links, and files are untrusted. The session database grants account control; the message database contains private content.
@@ -19,8 +24,8 @@ Review date: 2026-07-21. Scope: Rust source, local storage, authentication, medi
 | TG-05 | Medium | Release binaries are unsigned and the direct installer does not verify checksums; CI Actions use mutable major-version tags. | Mitigated for the POC: build a reviewed commit from source with `--locked`; do not use nightly/installer artifacts. Release provenance hardening remains open. |
 | TG-06 | Medium | Session and message databases are not application-encrypted at rest. | Accepted for the POC only with an encrypted VM disk, dedicated OS user, no shared mounts/backups, and device revocation after testing. |
 | TG-07 | Medium | The daemon has deny-list filters, not a default-deny chat allowlist, and stores every received account update. | Mitigated for the POC with a new account joined only to the throwaway test group and downstream chat-ID filtering. Add an allowlist before broader use. |
-| TG-08 | Low | launchd/systemd service files interpolate caller-controlled paths without robust XML/unit escaping and do not have a secure API-ID injection path. | Avoid service installation in the POC; run foreground. Fix before unattended deployment. |
-| TG-09 | Medium | The lockfile contained one RustSec vulnerability (`crossbeam-epoch` 0.9.18) and informational unsoundness in `anyhow`/`rand`. | Fixed with versions published at least 15 days before review: `crossbeam-epoch` 0.9.20, `anyhow` 1.0.103, `rand` 0.8.6/0.9.3. `cargo audit` reports zero vulnerabilities. |
+| TG-08 | Low | launchd/systemd service files interpolate caller-controlled paths without robust XML/unit escaping and do not have a secure API-ID injection path. | Partly fixed on this branch (2026-10-31): `daemon-service install` now requires `TELEGRAM_API_ID`, writes the validated `TELEGRAM_API_ID` (and `TELEGRAM_API_HASH` if present in the installing environment) into the unit, and creates the unit file `0600`. Path escaping is still naive. |
+| TG-09 | Medium | The lockfile contained one RustSec vulnerability (`crossbeam-epoch` 0.9.18) and informational unsoundness in `anyhow`/`rand`. | On this branch (2026-10-31): `Cargo.lock` has `crossbeam-epoch` 0.9.21, `anyhow` 1.0.104, `rand` 0.9.5 (rand 0.8 is not in the graph). `cargo audit` was not run here. |
 
 Remaining audit warnings are transitive: unmaintained/yanked `core2` through Grammers crypto, unmaintained `paste` through Turso, and two `git2` unsoundness advisories in Turso's build-time `built` dependency. The affected `git2` APIs are not called by tgcli and are not linked as a runtime feature. Replace these upstream dependency chains before calling the fork fully hardened.
 
