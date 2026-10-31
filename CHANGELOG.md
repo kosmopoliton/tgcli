@@ -3,8 +3,8 @@
 ## 0.4.0-kosmopoliton.1 (2026-10-31) — integration of community forks
 
 Base: upstream dgrr/tgcli v0.3.7 (f7686ad). Every commit below was read in full before it was
-cherry-picked; see `notes/tgcli-integration-log.md` in the orchestration repo for the per-commit
-summaries, trust verdicts and conflict notes.
+cherry-picked (per-commit summaries, trust verdicts and conflict notes are kept in a private
+integration log).
 
 ### Integrated
 
@@ -32,6 +32,20 @@ summaries, trust verdicts and conflict notes.
   (`--reconcile-interval-seconds`, 0 disables) dialogs are refreshed into grammers' peer cache and
   recent history is reconciled. Two changes to the original: the archived flag comes from the dialog's
   folder instead of a hard-coded `false`, and a store error is logged instead of killing the daemon.
+  Note: `sync msgs` (manual and daemon) now also includes chats that have no checkpoint yet, so the
+  first run after `sync chats` on a large account fetches every chat (FLOOD_WAIT risk; use
+  `--chat` or let the daemon's 30-day scope do it). Daemon update-state `catch_up` is always on.
+
+### Fixes on this branch
+
+- `auth status` reports connect failures as `{"authenticated": false, "error": …}` again.
+- `daemon-service install` requires `TELEGRAM_API_ID` and writes it (plus `TELEGRAM_API_HASH` if set)
+  into the launchd/systemd unit, which is created `0600`; previously the installed daemon would
+  restart-loop because the unit only set `RUST_LOG`.
+- Media downloaded by `sync`/`daemon`/`messages fetch --download-media` uses a sanitized extension.
+- `install.sh` no longer installs upstream's Homebrew formula on macOS; build from source.
+- `Cargo.lock`: anyhow 1.0.104, crossbeam-epoch 0.9.21 (RustSec), rand 0.9.5. `SECURITY.md` is
+  marked as inherited from exocognito's review.
 
 ### Not taken
 

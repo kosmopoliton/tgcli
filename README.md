@@ -2,8 +2,6 @@
 
 Telegram CLI tool using [grammers](https://github.com/Lonami/grammers) (MTProto), without a TDLib runtime dependency. This fork tracks [dgrr/tgcli](https://github.com/dgrr/tgcli).
 
-## Install
-
 ## What's in this fork
 
 Integrated from other forks and upstream PRs (see CHANGELOG.md for provenance):

@@ -46,18 +46,10 @@ get_install_dir() {
 
 # Install via Homebrew on macOS
 install_with_brew() {
-    echo "Installing via Homebrew..."
-    
-    if ! command -v brew &>/dev/null; then
-        echo "Homebrew not found. Installing Homebrew first..."
-        /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-    fi
-    
-    brew tap dgrr/tgcli 2>/dev/null || true
-    brew install tgcli
-    
-    echo ""
-    echo "✓ Installed ${BINARY} via Homebrew"
+    echo "This fork does not publish a Homebrew formula (upstream's dgrr/tgcli tap ships a different binary)." >&2
+    echo "Build from source: git clone https://github.com/${REPO}.git && cd tgcli && cargo build --locked --release" >&2
+    echo "or set NO_BREW=1 to download a release binary once fork releases exist." >&2
+    exit 1
 }
 
 # Install via direct binary download
